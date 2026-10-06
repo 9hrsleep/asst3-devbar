@@ -54,15 +54,22 @@ struct validate_wire_t {
 Feel free to redefine this, notice you also need to change how bend is read in
 inside main of wireroute.cpp.
 
+
 A better readable way of define this is:
 int start_x, start_y, end_x, end_y, bend1_x, bend1_y, bend2_x, bend2_y, bend3_x,
 bend3_y; but this might not be the most efficient way to define the solution
 space for a wire with <= 3 bends.
 */
+
+struct Point {
+  int x, y;
+};
+
 struct Wire {
-  /* Define the data structure for wire here. */
-  int start_x, start_y, end_x, end_y, mid_x, mid_y;
-  bool move_x_start, move_x_end;
+  int start_x, start_y;
+  int end_x, end_y;
+  std::array<Point, 3> bends{};
+  int num_bends = 0;
   validate_wire_t to_validate_format(void) const;
 };
 

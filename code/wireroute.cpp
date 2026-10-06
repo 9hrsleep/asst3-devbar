@@ -1,6 +1,6 @@
 /**
  * Parallel VLSI Wire Routing via OpenMP
- * Name 1(andrew_id 1), Name 2(andrew_id 2)
+ * Devika Manohar (dmanohar), Barbara Zhuo (jiayizhu)
  */
 
 #include "wireroute.h"
@@ -84,6 +84,67 @@ void write_output(
   out_wires.close();
 }
 
+/** from a chosen wire, get the point coordinates of starting point (at index 0),
+or a bend points (index 1, 2, 3) or end point (index 4)
+*/
+Point get_point_i(const Wire &wire, int i) {
+  if (i ==0){
+    return {wire.start_x, wire.start_y};
+  } else if (i == wire.num_bends + 1) {
+    return {wire.end_x, wire.end_y};
+  } else {
+    return wire.bends[i - 1];
+  }
+}
+
+/** this updates the occupancy matrix by adding or subtracting 1 in the entire
+ wire's path on the matrix. to add a wire, use delta = 1 and to subtract 
+ a wire, use delta = -1. 
+*/
+void update_occupancy_with_wire(std::vector<std::vector<int>> &occupancy,
+                               const Wire &wire, int delta) {
+  Point curr_pt = get_point_i(wire, 0);
+  occupancy[curr_pt.y][curr_pt.x] += delta;
+
+  // loop through all line segments and add the delta (+1 or -1) on all points you traverse
+  const int num_segments = wire.num_bends + 1;
+  for (int s = 0; s < num_segments; s++) {
+    // get the end point where this current segment will end
+    Point next_pt = get_point_i(wire, s + 1);
+    // figure out if we are adding from the x coordinate or subutracting
+    int step_x = 0;
+    if (next_pt.x > curr_pt.x) {
+      step_x = 1;
+    } else if (next_pt.x < curr_pt.x) {
+      step_x = -1;
+    }
+    // figure out if we are adding from the y coordinate or subutracting
+    int step_y = 0;
+    if (next_pt.y > curr_pt.y) {
+      step_y = 1;
+    } else if (next_pt.y < curr_pt.y) {
+      step_y = -1;
+    }
+    
+    // move through from curr_pt to next_pt
+    while (curr_pt.x != next_pt.x || curr_pt.y != next_pt.y) {
+      curr_pt.x += step_x;
+      curr_pt.y += step_y;
+      occupancy[curr_pt.y][curr_pt.x] += delta;
+    }
+  }
+}
+
+int calculate_occupancy_cost(const std::vector<std::vector<int>> &occupancy) {
+  int total = 0;
+  for (const auto &row : occupancy) {
+    for (std::size_t col = 0; col < row.size(); col ++) {
+      int count = row[col];
+      total += count * count;
+    }
+  }
+  return total;
+}
 
 int main(int argc, char *argv[]) {
   const auto init_start = std::chrono::steady_clock::now();
@@ -154,12 +215,17 @@ int main(int argc, char *argv[]) {
   fin >> dim_x >> dim_y >> num_wires;
 
   std::vector<Wire> wires(num_wires);
+  // occupancy matrix
   std::vector occupancy(dim_y, std::vector<int>(dim_x));
   std::cout << "Question Spec: dim_x=" << dim_x << ", dim_y=" << dim_y
             << ", number of wires=" << num_wires << '\n';
 
   // TODO (student code start): Read the wire information from file, 
   // you may need to change this if you define the wire structure differently.
+
+  // uniform distribution for set of all possible routes
+  std::bernoulli_distribution choose_random_route(SA_prob);
+
   for (auto &wire : wires) {
     fin >> wire.start_x >> wire.start_y >> wire.end_x >> wire.end_y;
     wire.move_x_start = true;
@@ -171,6 +237,7 @@ int main(int argc, char *argv[]) {
   /* Initialize any additional data structures needed in the algorithm */
 
   // Student code end
+
   const double init_time =
       std::chrono::duration_cast<std::chrono::duration<double>>(
           std::chrono::steady_clock::now() - init_start)
@@ -185,7 +252,66 @@ int main(int argc, char *argv[]) {
     Don't use global variables.
     Use OpenMP to parallelize the algorithm.
   */
-  
+    
+  // place initial route using greedy heuristic
+  for (const auto &wire : wires){ // OPENMP PARALLELIZE: each wire is independent for this initial laying
+    // straight line conditions
+    if (wire.start_x == wire.end_x) {
+      wire.num_bends = 0;
+      // draw straight vertical line
+      update_occupancy_with_wire(occupancy,wire,1);
+    } else if (wire.start_y == wire.end_y) {
+      // draw straight horizontal line
+      wire.num_bends = 0;
+      update_occupancy_with_wire(occupancy,wire,1);
+    } else {
+      // naive so draw 1 bend line (just to lay smth down)
+      wire.bend1_x = wire.start_x
+      wire.bend1_y = wire.end_y
+      wire.num_bends = 1
+      update_occupancy_with_wire(occupancy, wire, 1);
+    }
+  }
+  int curr_cost;
+  int best_cost;
+  Wire best_wire;
+  // now iterate 
+  for (int iters = 0; iters < SA_iters; iters++){
+    for (auto &wire : wires){
+      // straight line: no other paths for these wires
+      if (wire.num_bends == 0){
+        continue;
+      }
+
+      /*Iterate over all legal routes between the endpoints (including 1, 2, and 3 bends,
+      and horizontal-first and vertical-first routes), calculating their cost by reading the corresponding
+      elements of the occupancy matrix, squaring their values, and incrementally adding them to the cost
+      of the route. */
+      // measure current placement before removing wire
+      curr_cost = calculate_occupancy_cost(occupancy);
+      best_cost = curr_cost;
+      best_wire = wire;
+      // remove the old route
+      update_occupancy_with_wire(occupancy, wire, -1);
+
+      int dx = std::abs(wire.end_x - wire.start_x);
+      int dy = std::abs(wire.end_y - wire.start_y);
+
+      int x_direction = 1;
+      if (wire.end_x < wire.start_x) {
+        x_direction = -1;
+      }
+
+      int y_direction = 1;
+      if (wire.end_y < wire.start_y) {
+        y_direction = -1;
+      }
+      int num_routes = dx + dy + 2 * (dx - 1) * (dy - 1);
+      for (int route_idx = 0; route_idx < num_routes; route_idx++) {
+      }
+    }
+  }
+
   // initialize wires
   // Within wires
   if (parallel_mode == 'W') {
