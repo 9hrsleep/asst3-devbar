@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <omp.h>
 #include <vector>
+#include <array>
 
 #define MAX_PTS_PER_WIRE 5
 #define COST_REPORT_DEPTH 10

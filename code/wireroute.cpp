@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -88,12 +89,12 @@ void write_output(
 or a bend points (index 1, 2, 3) or end point (index 4)
 */
 Point get_point_i(const Wire &wire, int i) {
-  if (i ==0){
+  if (i == 0){
     return {wire.start_x, wire.start_y};
   } else if (i == wire.num_bends + 1) {
     return {wire.end_x, wire.end_y};
   } else {
-    return wire.bends[i - 1];
+    return wire.bends[i-1];
   }
 }
 
@@ -135,15 +136,204 @@ void update_occupancy_with_wire(std::vector<std::vector<int>> &occupancy,
   }
 }
 
-int calculate_occupancy_cost(const std::vector<std::vector<int>> &occupancy) {
-  int total = 0;
-  for (const auto &row : occupancy) {
-    for (std::size_t col = 0; col < row.size(); col ++) {
-      int count = row[col];
-      total += count * count;
+
+/** calculates the cost of laying a route on the occupancy matrix without 
+ calculating all (NxN) individual square costs. for every point 
+ the route passes through, we add the occupancy of that square. */
+int calculate_route_cost(const std::vector<std::vector<int>> &occupancy,
+                         const Wire &route) {
+  Point curr_pt = get_point_i(route, 0);
+  int new_count = occupancy[curr_pt.y][curr_pt.x] + 1;
+  int route_cost = new_count * new_count;
+
+  // loop through all segments and add the cost of every point
+  const int num_segments = route.num_bends + 1;
+  for (int s = 0; s < num_segments; s++) {
+    // get end point for curr segment
+    Point next_pt = get_point_i(route, s + 1);
+    // figure out if we are adding to the x coordinate or subtracting
+    int step_x = 0;
+    if (next_pt.x > curr_pt.x) {
+      step_x = 1;
+    } else if (next_pt.x < curr_pt.x) {
+      step_x = -1;
+    }
+    // figure out if we are adding to the y coordinate or subtracting
+    int step_y = 0;
+    if (next_pt.y > curr_pt.y) {
+      step_y = 1;
+    } else if (next_pt.y < curr_pt.y) {
+      step_y = -1;
+    }
+
+    // move through from curr_pt to next_pt and add each new point's cost
+    while (curr_pt.x != next_pt.x || curr_pt.y != next_pt.y) {
+      curr_pt.x += step_x;
+      curr_pt.y += step_y;
+      new_count = occupancy[curr_pt.y][curr_pt.x] + 1;
+      route_cost += new_count * new_count;
     }
   }
-  return total;
+  return route_cost;
+}
+
+// int calculate_occupancy_cost(const std::vector<std::vector<int>> &occupancy) {
+//   int total = 0;
+//   for (const auto &row : occupancy) {
+//     for (std::size_t col = 0; col < row.size(); col ++) {
+//       int count = row[col];
+//       total += count * count;
+//     }
+//   }
+//   return total;
+// }
+
+// we are building the route based on the index, bounding box 
+Wire build_route(const Wire &wire, int route_idx) {
+  Wire route = wire;
+  const int start_x = wire.start_x;
+  const int start_y = wire.start_y;
+  const int end_x = wire.end_x;
+  const int end_y = wire.end_y;
+  const int dx = std::abs(end_x - start_x);
+  const int dy = std::abs(end_y - start_y);
+  // direction the start pt points towards the end pt if we think about
+  // it directionally
+  const int x_dir = (end_x > start_x) ? 1 : -1;
+  const int y_dir = (end_y > start_y) ? 1 : -1;
+  const int routes_per_three_bend_shape = (dx - 1) * (dy - 1);
+
+  // low id chooses horizontal first options: turn at column x1
+  if (route_idx < dx) {
+    int x1 = start_x + x_dir * (route_idx + 1);
+    if (x1 == end_x) {
+      route.num_bends = 1;
+      route.bends[0] = {end_x, start_y};
+    } else {
+      route.num_bends = 2;
+      route.bends[0] = {x1, start_y};
+      route.bends[1] = {x1, end_y};
+    }
+  // go down vertical first options with v height = 1, 2 ... turn at row y1 into horizontal
+  } else if (route_idx < dx + dy) {
+    int y1 = start_y + y_dir * (route_idx - dx + 1);
+    if (y1 == end_y) {
+      route.num_bends = 1;
+      route.bends[0] = {start_x, end_y};
+    } else {
+      route.num_bends = 2;
+      route.bends[0] = {start_x, y1};
+      route.bends[1] = {end_x, y1};
+    }
+  } else {
+    // pick the middle bend location randomly within the "bounding box"
+    // and then set the other two bends to make the route work
+    // k = which 3 bend im on, subtract dx + dy because get rid of 1 bend and 2 bend
+
+    // 3-bend routes
+    // position within the 3 bend section
+    int three_bend_offset = route_idx - (dx + dy);
+
+    // first half of the section is horizontal first, second half is vertical first
+    bool starts_horizontal = (three_bend_offset < routes_per_three_bend_shape);
+    if (!starts_horizontal) {
+      three_bend_offset -= routes_per_three_bend_shape;
+    }
+
+    // unflatten the offset
+    int turn_column_choice = three_bend_offset / (dy - 1);
+    int turn_row_choice    = three_bend_offset % (dy - 1);
+    int turn_x = start_x + x_dir * (turn_column_choice + 1);
+    int turn_y = start_y + y_dir * (turn_row_choice + 1);
+
+    route.num_bends = 3;
+    if (starts_horizontal) {
+      route.bends[0] = {turn_x, start_y};
+      route.bends[1] = {turn_x, turn_y};
+      route.bends[2] = {end_x, turn_y};
+    } else {
+      route.bends[0] = {start_x, turn_y};
+      route.bends[1] = {turn_x, turn_y};
+      route.bends[2] = {turn_x, end_y};
+    }
+  }
+  return route;
+}
+
+void route_within_wires(std::vector<Wire> &wires, std::vector<std::vector<int>> &occupancy,
+  int SA_iters, double SA_prob, int num_threads) {
+  // random number generator for simulated annealing
+  std::mt19937 rng(676);
+  std::bernoulli_distribution choose_random_route(SA_prob);
+
+  // do iterative algorithm
+  for (int iters = 0; iters < SA_iters; iters++) {
+    for (auto &wire : wires) { // no parallelization across wires
+      // straight line conditions
+      if (wire.num_bends == 0) {
+        continue;
+      }
+      // remove original route placed in greedy placement so it doesn't count the cost of that layout
+      update_occupancy_with_wire(occupancy, wire, -1);
+
+      int dx = std::abs(wire.end_x - wire.start_x);
+      int dy = std::abs(wire.end_y - wire.start_y);
+      int num_routes = dx + dy + 2 * (dx - 1) * (dy - 1);
+
+      
+      Wire best_wire = wire;
+      
+      // either pick a random route or do a full search for the best route
+      if (choose_random_route(rng)) {
+        std::uniform_int_distribution<int> pick_random_route(0, num_routes - 1);
+        best_wire = build_route(wire, pick_random_route(rng));
+      } 
+      
+      else {
+        // CITE: initialize worst cost to highest number so better costs can compare if <
+        int best_cost = std::numeric_limits<int>::max();
+        int best_route_idx = num_routes;
+
+        // parallelize the candidate search across threads (threads might have to deal with more than 1 route)
+        // threads score every possible route in parallel, and each one updates its private best variables
+        #pragma omp parallel num_threads(num_threads)
+        {
+          int local_best_cost = std::numeric_limits<int>::max();
+          int local_best_idx = num_routes;
+
+          #pragma omp for schedule(static) nowait
+          for (int route_idx = 0; route_idx < num_routes; route_idx++) {
+
+            // calculate a route given the enumeration strat we have with route_idx
+            Wire new_route = build_route(wire, route_idx);
+            int new_cost = calculate_route_cost(occupancy, new_route);
+
+            if (new_cost < local_best_cost || (new_cost == local_best_cost &&
+                route_idx < local_best_idx)) { // ties go to the lowest index
+              local_best_cost = new_cost;
+              local_best_idx = route_idx;
+            }
+          }
+
+          // now we have best, best result
+          // among all the thread's private local bests pick the lowest cost, so we have the best amongst all threads
+          #pragma omp critical
+          {
+            if (local_best_cost < best_cost ||
+                (local_best_cost == best_cost &&
+                local_best_idx < best_route_idx)) {
+              best_cost = local_best_cost;
+              best_route_idx = local_best_idx;
+            }
+          }
+        }
+        best_wire = build_route(wire, best_route_idx);
+      }
+      // actually update the occupancy matrix with the new best wire
+      wire = best_wire;
+      update_occupancy_with_wire(occupancy, wire, 1);
+    }
+  }
 }
 
 int main(int argc, char *argv[]) {
@@ -227,11 +417,12 @@ int main(int argc, char *argv[]) {
   std::bernoulli_distribution choose_random_route(SA_prob);
 
   for (auto &wire : wires) {
+    wire.num_bends = 0;
     fin >> wire.start_x >> wire.start_y >> wire.end_x >> wire.end_y;
-    wire.move_x_start = true;
-    wire.move_x_end = false;
-    wire.mid_x = wire.end_x;
-    wire.mid_y = wire.start_y;
+    // wire.move_x_start = true;
+    // wire.move_x_end = false;
+    // wire.mid_x = wire.end_x;
+    // wire.mid_y = wire.start_y;
   }
 
   /* Initialize any additional data structures needed in the algorithm */
@@ -252,9 +443,12 @@ int main(int argc, char *argv[]) {
     Don't use global variables.
     Use OpenMP to parallelize the algorithm.
   */
+
+  // TODO WE HAVE TO PARSE THE INPUT WIRE START AND END AND POPULATE THE
+  // WIRES list, making sure we 0 initiate all parameters
     
   // place initial route using greedy heuristic
-  for (const auto &wire : wires){ // OPENMP PARALLELIZE: each wire is independent for this initial laying
+  for (auto &wire : wires){ // OPENMP PARALLELIZE: each wire is independent for this initial laying
     // straight line conditions
     if (wire.start_x == wire.end_x) {
       wire.num_bends = 0;
@@ -266,56 +460,17 @@ int main(int argc, char *argv[]) {
       update_occupancy_with_wire(occupancy,wire,1);
     } else {
       // naive so draw 1 bend line (just to lay smth down)
-      wire.bend1_x = wire.start_x
-      wire.bend1_y = wire.end_y
-      wire.num_bends = 1
+      wire.bends[0] = {wire.start_x, wire.end_y};
+      wire.num_bends = 1;
       update_occupancy_with_wire(occupancy, wire, 1);
     }
   }
-  int curr_cost;
-  int best_cost;
-  Wire best_wire;
-  // now iterate 
-  for (int iters = 0; iters < SA_iters; iters++){
-    for (auto &wire : wires){
-      // straight line: no other paths for these wires
-      if (wire.num_bends == 0){
-        continue;
-      }
-
-      /*Iterate over all legal routes between the endpoints (including 1, 2, and 3 bends,
-      and horizontal-first and vertical-first routes), calculating their cost by reading the corresponding
-      elements of the occupancy matrix, squaring their values, and incrementally adding them to the cost
-      of the route. */
-      // measure current placement before removing wire
-      curr_cost = calculate_occupancy_cost(occupancy);
-      best_cost = curr_cost;
-      best_wire = wire;
-      // remove the old route
-      update_occupancy_with_wire(occupancy, wire, -1);
-
-      int dx = std::abs(wire.end_x - wire.start_x);
-      int dy = std::abs(wire.end_y - wire.start_y);
-
-      int x_direction = 1;
-      if (wire.end_x < wire.start_x) {
-        x_direction = -1;
-      }
-
-      int y_direction = 1;
-      if (wire.end_y < wire.start_y) {
-        y_direction = -1;
-      }
-      int num_routes = dx + dy + 2 * (dx - 1) * (dy - 1);
-      for (int route_idx = 0; route_idx < num_routes; route_idx++) {
-      }
-    }
-  }
-
+  
   // initialize wires
   // Within wires
   if (parallel_mode == 'W') {
     // within wires
+    route_within_wires(wires, occupancy, SA_iters, SA_prob, num_threads);
   } else {
     // across wires
   }
@@ -343,6 +498,12 @@ int main(int argc, char *argv[]) {
 */
 validate_wire_t Wire::to_validate_format(void) const {
   validate_wire_t w;
-  
+  // keypoints are start, every bend, then end
+  w.num_pts = num_bends + 2;
+  for (int i = 0; i < w.num_pts; i++) {
+    Point pt = get_point_i(*this, i);
+    w.p[i].x = pt.x;
+    w.p[i].y = pt.y;
+  }
   return w;
 }
