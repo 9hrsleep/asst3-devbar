@@ -99,58 +99,22 @@ Point get_point_i(const Wire &wire, int i) {
 }
 
 /** this updates the occupancy matrix by adding or subtracting 1 in the entire
- wire's path on the matrix. to add a wire, use delta = 1 and to subtract 
- a wire, use delta = -1. 
+ wire's path on the matrix. to add a wire, use delta = 1 and to subtract
+ a wire, use delta = -1. we also update occupancy_T (the transposed copy,
+ occupancy_T[x][y] == occupancy[y][x]) so the two always stay in sync.
 */
 void update_occupancy_with_wire(std::vector<std::vector<int>> &occupancy,
-                               const Wire &wire, int delta) {
+                                std::vector<std::vector<int>> &occupancy_T,
+                                const Wire &wire, int delta) {
   Point curr_pt = get_point_i(wire, 0);
   occupancy[curr_pt.y][curr_pt.x] += delta;
+  occupancy_T[curr_pt.x][curr_pt.y] += delta;
 
   // loop through all line segments and add the delta (+1 or -1) on all points you traverse
   const int num_segments = wire.num_bends + 1;
   for (int s = 0; s < num_segments; s++) {
     // get the end point where this current segment will end
     Point next_pt = get_point_i(wire, s + 1);
-    // figure out if we are adding from the x coordinate or subutracting
-    int step_x = 0;
-    if (next_pt.x > curr_pt.x) {
-      step_x = 1;
-    } else if (next_pt.x < curr_pt.x) {
-      step_x = -1;
-    }
-    // figure out if we are adding from the y coordinate or subutracting
-    int step_y = 0;
-    if (next_pt.y > curr_pt.y) {
-      step_y = 1;
-    } else if (next_pt.y < curr_pt.y) {
-      step_y = -1;
-    }
-    
-    // move through from curr_pt to next_pt
-    while (curr_pt.x != next_pt.x || curr_pt.y != next_pt.y) {
-      curr_pt.x += step_x;
-      curr_pt.y += step_y;
-      occupancy[curr_pt.y][curr_pt.x] += delta;
-    }
-  }
-}
-
-
-/** calculates the cost of laying a route on the occupancy matrix without 
- calculating all (NxN) individual square costs. for every point 
- the route passes through, we add the occupancy of that square. */
-int calculate_route_cost(const std::vector<std::vector<int>> &occupancy,
-                         const Wire &route) {
-  Point curr_pt = get_point_i(route, 0);
-  int new_count = occupancy[curr_pt.y][curr_pt.x] + 1;
-  int route_cost = new_count * new_count;
-
-  // loop through all segments and add the cost of every point
-  const int num_segments = route.num_bends + 1;
-  for (int s = 0; s < num_segments; s++) {
-    // get end point for curr segment
-    Point next_pt = get_point_i(route, s + 1);
     // figure out if we are adding to the x coordinate or subtracting
     int step_x = 0;
     if (next_pt.x > curr_pt.x) {
@@ -166,27 +130,55 @@ int calculate_route_cost(const std::vector<std::vector<int>> &occupancy,
       step_y = -1;
     }
 
-    // move through from curr_pt to next_pt and add each new point's cost
+    // move through from curr_pt to next_pt, updating both grids
     while (curr_pt.x != next_pt.x || curr_pt.y != next_pt.y) {
       curr_pt.x += step_x;
       curr_pt.y += step_y;
-      new_count = occupancy[curr_pt.y][curr_pt.x] + 1;
-      route_cost += new_count * new_count;
+      occupancy[curr_pt.y][curr_pt.x] += delta;
+      occupancy_T[curr_pt.x][curr_pt.y] += delta;
     }
+  }
+}
+
+/** gets cost of laying a route on the occupancy matrix without
+ calculating all square costs by only looking at the val at each square the route
+ passes through. add (occupancy + 1)^2 to that square and keep traversing
+*/
+int calculate_route_cost(const std::vector<std::vector<int>> &occupancy,
+                         const std::vector<std::vector<int>> &occupancy_T,
+                         const Wire &route) {
+  Point curr_pt = get_point_i(route, 0);
+  int new_count = occupancy[curr_pt.y][curr_pt.x] + 1;
+  int route_cost = new_count * new_count;
+
+  // loop through all segments and add the cost of every point
+  const int num_segments = route.num_bends + 1;
+  for (int s = 0; s < num_segments; s++) {
+    // get end point for curr segment
+    Point next_pt = get_point_i(route, s + 1);
+
+    if (next_pt.y == curr_pt.y) {
+      // horizontal segment: walk along one row of occupancy
+      const int *row = occupancy[curr_pt.y].data();
+      int step_x = (next_pt.x > curr_pt.x) ? 1 : -1;
+      for (int x = curr_pt.x + step_x; x != next_pt.x + step_x; x += step_x) {
+        new_count = row[x] + 1;
+        route_cost += new_count * new_count;
+      }
+    } else {
+      // vertical segment: walk along one row of occupancy_T (= one column of occupancy)
+      const int *col = occupancy_T[curr_pt.x].data();
+      int step_y = (next_pt.y > curr_pt.y) ? 1 : -1;
+      for (int y = curr_pt.y + step_y; y != next_pt.y + step_y; y += step_y) {
+        new_count = col[y] + 1;
+        route_cost += new_count * new_count;
+      }
+    }
+    // this segment's end is the next segment's start
+    curr_pt = next_pt;
   }
   return route_cost;
 }
-
-// int calculate_occupancy_cost(const std::vector<std::vector<int>> &occupancy) {
-//   int total = 0;
-//   for (const auto &row : occupancy) {
-//     for (std::size_t col = 0; col < row.size(); col ++) {
-//       int count = row[col];
-//       total += count * count;
-//     }
-//   }
-//   return total;
-// }
 
 // we are building the route based on the index, bounding box 
 Wire build_route(const Wire &wire, int route_idx) {
@@ -261,7 +253,8 @@ Wire build_route(const Wire &wire, int route_idx) {
 }
 
 void route_within_wires(std::vector<Wire> &wires, std::vector<std::vector<int>> &occupancy,
-  int SA_iters, double SA_prob, int num_threads) {
+     std::vector<std::vector<int>> &occupancy_T,
+     int SA_iters, double SA_prob, int num_threads) {
   // random number generator for simulated annealing
   std::mt19937 rng(676);
   std::bernoulli_distribution choose_random_route(SA_prob);
@@ -274,7 +267,7 @@ void route_within_wires(std::vector<Wire> &wires, std::vector<std::vector<int>> 
         continue;
       }
       // remove original route placed in greedy placement so it doesn't count the cost of that layout
-      update_occupancy_with_wire(occupancy, wire, -1);
+      update_occupancy_with_wire(occupancy, occupancy_T, wire, -1);
 
       int dx = std::abs(wire.end_x - wire.start_x);
       int dy = std::abs(wire.end_y - wire.start_y);
@@ -306,7 +299,7 @@ void route_within_wires(std::vector<Wire> &wires, std::vector<std::vector<int>> 
 
             // calculate a route given the enumeration strat we have with route_idx
             Wire new_route = build_route(wire, route_idx);
-            int new_cost = calculate_route_cost(occupancy, new_route);
+            int new_cost = calculate_route_cost(occupancy, occupancy_T, new_route);
 
             if (new_cost < local_best_cost || (new_cost == local_best_cost &&
                 route_idx < local_best_idx)) { // ties go to the lowest index
@@ -331,7 +324,114 @@ void route_within_wires(std::vector<Wire> &wires, std::vector<std::vector<int>> 
       }
       // actually update the occupancy matrix with the new best wire
       wire = best_wire;
-      update_occupancy_with_wire(occupancy, wire, 1);
+      update_occupancy_with_wire(occupancy, occupancy_T, wire, 1);
+    }
+  }
+}
+
+/** counts how many legal routes a bent wire has (all 1, 2, and 3 bend routes) */
+int count_routes(const Wire &wire) {
+  int dx = std::abs(wire.end_x - wire.start_x);
+  int dy = std::abs(wire.end_y - wire.start_y);
+  return dx + dy + 2 * (dx - 1) * (dy - 1);
+}
+
+/** sequentially try every route for one wire and returns the index of the
+ cheapest one (for across wires approach) */
+int find_best_route_idx(const std::vector<std::vector<int>> &occupancy,
+                        const std::vector<std::vector<int>> &occupancy_T,
+                        const Wire &wire, int num_routes) {
+  // found from https://en.cppreference.com/cpp/types/numeric_limits/max
+  // initialize worst cost to highest number so better costs can compare if <
+  int best_cost = std::numeric_limits<int>::max();
+  int best_route_idx = 0;
+  for (int route_idx = 0; route_idx < num_routes; route_idx++) {
+    Wire new_route = build_route(wire, route_idx);
+    int new_cost = calculate_route_cost(occupancy, occupancy_T, new_route);
+    if (new_cost < best_cost) { // <: ties go to the lowest index
+      best_cost = new_cost;
+      best_route_idx = route_idx;
+    }
+  }
+  return best_route_idx;
+}
+
+/** across wires: wires are processed in batches of batch_size (batch size = 1 is sequential).
+ a thread handle a batch of wires at the same time.
+ logic:
+ - one thread removes every wire in the batch from the grid, makes the
+  simulated annealing random choices up front to prevent wasting path traversal work
+ - paralle threads grab wires from batch and search for best route (READ only stage)
+ - one thread writes chosen wrote for every wire in the batch
+*/
+void route_across_wires(std::vector<Wire> &wires, std::vector<std::vector<int>> &occupancy,
+  std::vector<std::vector<int>> &occupancy_T,
+  int SA_iters, double SA_prob, int num_threads, int batch_size) {
+  // random number generator for simulated annealing
+  std::mt19937 rng(676);
+  std::bernoulli_distribution choose_random_route(SA_prob);
+
+  const int num_wires = wires.size();
+  // final route index for each wire in the batch
+  std::vector<int> chosen_route_idx(batch_size);
+  // booleans to help signal if we are 
+  std::vector<bool> search_curr_wire(batch_size, false);
+
+  // do iterative algorithm
+  for (int iters = 0; iters < SA_iters; iters++) {
+    // SPLIT INTO BATCHES
+    for (int batch_start = 0; batch_start < num_wires; batch_start += batch_size) {
+      // make sure final batch is right size
+      int batch_end = std::min(batch_start + batch_size, num_wires);
+      
+      // remove ALL wires in current batch and decide randomness up front
+      // wires in the same batch can't decide their route based on the others routes, so there can
+      // be staler information
+      for (int w = batch_start; w < batch_end; w++) {
+        // batch_idx is wire's position in current batch
+        int batch_idx = w - batch_start;
+        // reset to false
+        search_curr_wire[batch_idx] = false;
+        if (wires[w].num_bends == 0) {
+          continue;
+        }
+        // remove old route so it doesn't count against itself
+        update_occupancy_with_wire(occupancy, occupancy_T, wires[w], -1);
+
+        // simulated annealing: with probability SA_prob, take a random route
+        if (choose_random_route(rng)) {
+          std::uniform_int_distribution<int> pick_random_route(0, count_routes(wires[w]) - 1);
+          chosen_route_idx[batch_idx] = pick_random_route(rng);
+        } else {
+          search_curr_wire[batch_idx] = true;
+        }
+      }
+
+      // PARALLELIZE: each thread searches for the best route of different wires
+      // through testing we found dynamic scheduling of fine granularity works best
+      // longer wires have higher numbers of routes, so threads work on
+      // next wire when done with current (load balancing)
+      // from http://jakascorner.com/blog/2016/06/omp-for-scheduling.html 
+      #pragma omp parallel for num_threads(num_threads) schedule(dynamic, 1)
+      for (int w = batch_start; w < batch_end; w++) {
+        int batch_idx = w - batch_start;
+        if (search_curr_wire[batch_idx]) {
+          // each thread writes best into its own wire struct so no synchronization needed
+          chosen_route_idx[batch_idx] = find_best_route_idx(occupancy, occupancy_T,
+                                                wires[w], count_routes(wires[w]));
+        }
+      }
+
+      // back to one thread writing every wire in the batch back on the grid
+      for (int w = batch_start; w < batch_end; w++) {
+        int batch_idx = w - batch_start;
+        // skip straight wires
+        if (wires[w].num_bends == 0) {
+          continue;
+        }
+        wires[w] = build_route(wires[w], chosen_route_idx[batch_idx]);
+        update_occupancy_with_wire(occupancy, occupancy_T, wires[w], 1);
+      }
     }
   }
 }
@@ -407,6 +507,7 @@ int main(int argc, char *argv[]) {
   std::vector<Wire> wires(num_wires);
   // occupancy matrix
   std::vector occupancy(dim_y, std::vector<int>(dim_x));
+  std::vector occupancy_T(dim_x, std::vector<int>(dim_y));
   std::cout << "Question Spec: dim_x=" << dim_x << ", dim_y=" << dim_y
             << ", number of wires=" << num_wires << '\n';
 
@@ -453,16 +554,16 @@ int main(int argc, char *argv[]) {
     if (wire.start_x == wire.end_x) {
       wire.num_bends = 0;
       // draw straight vertical line
-      update_occupancy_with_wire(occupancy,wire,1);
+      update_occupancy_with_wire(occupancy, occupancy_T, wire, 1);
     } else if (wire.start_y == wire.end_y) {
       // draw straight horizontal line
       wire.num_bends = 0;
-      update_occupancy_with_wire(occupancy,wire,1);
+      update_occupancy_with_wire(occupancy, occupancy_T, wire, 1);
     } else {
       // naive so draw 1 bend line (just to lay smth down)
       wire.bends[0] = {wire.start_x, wire.end_y};
       wire.num_bends = 1;
-      update_occupancy_with_wire(occupancy, wire, 1);
+      update_occupancy_with_wire(occupancy, occupancy_T, wire, 1);
     }
   }
   
@@ -470,9 +571,10 @@ int main(int argc, char *argv[]) {
   // Within wires
   if (parallel_mode == 'W') {
     // within wires
-    route_within_wires(wires, occupancy, SA_iters, SA_prob, num_threads);
+    route_within_wires(wires, occupancy, occupancy_T, SA_iters, SA_prob, num_threads);
   } else {
     // across wires
+    route_across_wires(wires, occupancy, occupancy_T, SA_iters, SA_prob, num_threads, batch_size);
   }
 
   // Student code end
